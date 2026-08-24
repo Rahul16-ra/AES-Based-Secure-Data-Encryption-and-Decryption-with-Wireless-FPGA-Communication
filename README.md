@@ -9,16 +9,17 @@ The system allows data entered on **PC1** to be encrypted by FPGA1, transmitted 
 
 
 Features
->AES-128 encryption and decryption
->Password-based authentication
->Wireless FPGA-to-FPGA communication
->ESP-NOW communication between ESP32 devices
->UART communication between FPGA and ESP32
->16-byte AES block processing
->Ping-pong buffering for continuous data transfer
->>Python-based PC sender and receiver programs
->Hex monitoring and debugging through ESP32 Serial Monitor
->Working Principle
+AES-128 encryption and decryption
+Password-based authentication
+Wireless FPGA-to-FPGA communication
+ESP-NOW communication between ESP32 devices
+UART communication between FPGA and ESP32
+16-byte AES block processing
+Ping-pong buffering for continuous data transfer
+>Python-based PC sender and receiver programs
+Hex monitoring and debugging through ESP32 Serial Monitor
+
+Working Principle
 1. Authentication
 
 Before transferring data, both FPGA systems perform password-based authentication.
