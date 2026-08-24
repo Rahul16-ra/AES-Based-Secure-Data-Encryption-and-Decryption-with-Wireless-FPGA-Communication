@@ -1,0 +1,489 @@
+#include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
+
+#define FPGA_RX_PIN 16
+#define FPGA_TX_PIN 17
+#define UART_BAUD 115200
+
+HardwareSerial FPGA_UART(2);
+
+uint8_t ESP1_MAC[] = {
+  0xB0,
+  0xA7,
+  0x32,
+  0x2A,
+  0xE3,
+  0x90
+};
+
+uint8_t ESP2_MAC[] = {
+  0xB0,
+  0xA7,
+  0x32,
+  0x2B,
+  0x55,
+  0x70
+};
+
+#define MAX_PACKET_SIZE 240
+#define UART_TIMEOUT 5
+
+uint8_t uartBuffer[MAX_PACKET_SIZE];
+int uartLength = 0;
+unsigned long lastUARTByte = 0;
+
+uint8_t espNowBuffer[MAX_PACKET_SIZE];
+volatile int espNowLength = 0;
+volatile bool espNowReceived = false;
+
+String serialInput = "";
+
+void printHex(
+  const char *message,
+  const uint8_t *data,
+  int length
+)
+{
+  Serial.print(message);
+
+  for (int i = 0; i < length; i++)
+  {
+    if (data[i] < 0x10)
+      Serial.print("0");
+
+    Serial.print(data[i], HEX);
+
+    if (i < length - 1)
+      Serial.print(" ");
+  }
+
+  Serial.println();
+}
+
+void printMAC(uint8_t *mac)
+{
+  for (int i = 0; i < 6; i++)
+  {
+    if (mac[i] < 0x10)
+      Serial.print("0");
+
+    Serial.print(mac[i], HEX);
+
+    if (i < 5)
+      Serial.print(":");
+  }
+
+  Serial.println();
+}
+
+int hexValue(char c)
+{
+  if (c >= '0' && c <= '9')
+    return c - '0';
+
+  if (c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+
+  if (c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+
+  return -1;
+}
+
+int parseHexString(
+  String input,
+  uint8_t *output
+)
+{
+  input.trim();
+
+  int outputLength = 0;
+  int highNibble = -1;
+
+  for (int i = 0; i < input.length(); i++)
+  {
+    char c = input[i];
+
+    if (
+      c == ' ' ||
+      c == '\t' ||
+      c == ',' ||
+      c == ':'
+    )
+    {
+      continue;
+    }
+
+    int value = hexValue(c);
+
+    if (value < 0)
+    {
+      return -1;
+    }
+
+    if (highNibble == -1)
+    {
+      highNibble = value;
+    }
+    else
+    {
+      if (outputLength >= MAX_PACKET_SIZE)
+      {
+        return -2;
+      }
+
+      output[outputLength++] =
+        (highNibble << 4) | value;
+
+      highNibble = -1;
+    }
+  }
+
+  if (highNibble != -1)
+  {
+    return -3;
+  }
+
+  return outputLength;
+}
+
+void sendSerialMonitorHex(String input)
+{
+  uint8_t buffer[MAX_PACKET_SIZE];
+
+  int length =
+    parseHexString(
+      input,
+      buffer
+    );
+
+  if (length < 0)
+  {
+    Serial.println();
+    Serial.println("ERROR: Invalid HEX data.");
+
+    if (length == -3)
+      Serial.println(
+        "ERROR: HEX digits must come in pairs."
+      );
+
+    Serial.println();
+
+    return;
+  }
+
+  if (length == 0)
+  {
+    return;
+  }
+
+  printHex(
+    "SERIAL MONITOR HEX -> ESP-NOW TX: ",
+    buffer,
+    length
+  );
+
+  esp_err_t result =
+    esp_now_send(
+      ESP2_MAC,
+      buffer,
+      length
+    );
+
+  if (result != ESP_OK)
+  {
+    Serial.print(
+      "ESP-NOW SEND ERROR: "
+    );
+
+    Serial.println(result);
+  }
+}
+
+void onDataSent(
+  const wifi_tx_info_t *info,
+  esp_now_send_status_t status
+)
+{
+  Serial.print("ESP-NOW TX STATUS: ");
+
+  if (status == ESP_NOW_SEND_SUCCESS)
+    Serial.println("SUCCESS");
+  else
+    Serial.println("FAILED");
+}
+
+void onDataRecv(
+  const esp_now_recv_info_t *info,
+  const uint8_t *data,
+  int length
+)
+{
+  if (length > MAX_PACKET_SIZE)
+    length = MAX_PACKET_SIZE;
+
+  memcpy(
+    espNowBuffer,
+    data,
+    length
+  );
+
+  espNowLength = length;
+  espNowReceived = true;
+}
+
+void setup()
+{
+  Serial.begin(115200);
+
+  delay(1000);
+
+  Serial.println();
+  Serial.println();
+  Serial.println(
+    "=========================================="
+  );
+
+  Serial.println(
+    "              ESP32-1"
+  );
+
+  Serial.println(
+    "       UART <-> ESP-NOW BRIDGE"
+  );
+
+  Serial.println(
+    "=========================================="
+  );
+
+  FPGA_UART.begin(
+    UART_BAUD,
+    SERIAL_8N1,
+    FPGA_RX_PIN,
+    FPGA_TX_PIN
+  );
+
+  Serial.println();
+  Serial.println("UART2 initialized");
+  Serial.println("RX = GPIO 16");
+  Serial.println("TX = GPIO 17");
+  Serial.println("Baud = 115200");
+
+  WiFi.mode(WIFI_STA);
+
+  delay(500);
+
+  WiFi.setSleep(false);
+
+  delay(100);
+
+  uint8_t mac[6];
+
+  esp_wifi_get_mac(
+    WIFI_IF_STA,
+    mac
+  );
+
+  Serial.print(
+    "ESP32-1 MAC: "
+  );
+
+  printMAC(mac);
+
+  if (esp_now_init() != ESP_OK)
+  {
+    Serial.println(
+      "ERROR: ESP-NOW initialization failed!"
+    );
+
+    while (true)
+      delay(1000);
+  }
+
+  Serial.println(
+    "ESP-NOW initialized"
+  );
+
+  esp_now_register_send_cb(
+    onDataSent
+  );
+
+  esp_now_register_recv_cb(
+    onDataRecv
+  );
+
+  esp_now_peer_info_t peerInfo = {};
+
+  memcpy(
+    peerInfo.peer_addr,
+    ESP2_MAC,
+    6
+  );
+
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  if (!esp_now_is_peer_exist(ESP2_MAC))
+  {
+    esp_err_t result =
+      esp_now_add_peer(
+        &peerInfo
+      );
+
+    if (result == ESP_OK)
+    {
+      Serial.println(
+        "ESP32-2 peer added"
+      );
+    }
+    else
+    {
+      Serial.print(
+        "ERROR adding ESP32-2 peer: "
+      );
+
+      Serial.println(result);
+    }
+  }
+
+  Serial.println();
+  Serial.println(
+    "=========================================="
+  );
+
+  Serial.println(
+    "Type HEX data in Serial Monitor:"
+  );
+
+  Serial.println(
+    "Example: A5 01 FF 3C 00 7E"
+  );
+
+  Serial.println(
+    "Then press SEND."
+  );
+
+  Serial.println(
+    "=========================================="
+  );
+
+  Serial.println();
+}
+
+void loop()
+{
+  while (Serial.available())
+  {
+    char c = Serial.read();
+
+    if (c == '\n' || c == '\r')
+    {
+      if (serialInput.length() > 0)
+      {
+        sendSerialMonitorHex(
+          serialInput
+        );
+
+        serialInput = "";
+      }
+    }
+    else
+    {
+      serialInput += c;
+    }
+  }
+
+  while (FPGA_UART.available())
+  {
+    if (uartLength < MAX_PACKET_SIZE)
+    {
+      uartBuffer[uartLength++] =
+        FPGA_UART.read();
+
+      lastUARTByte = millis();
+    }
+    else
+    {
+      break;
+    }
+  }
+
+  if (uartLength > 0)
+  {
+    if (
+      millis() - lastUARTByte
+      >= UART_TIMEOUT
+    )
+    {
+      printHex(
+        "FPGA1 UART RX: ",
+        uartBuffer,
+        uartLength
+      );
+
+      printHex(
+        "FPGA1 -> ESP-NOW TX: ",
+        uartBuffer,
+        uartLength
+      );
+
+      esp_err_t result =
+        esp_now_send(
+          ESP2_MAC,
+          uartBuffer,
+          uartLength
+        );
+
+      if (result != ESP_OK)
+      {
+        Serial.print(
+          "ESP-NOW SEND ERROR: "
+        );
+
+        Serial.println(result);
+      }
+
+      uartLength = 0;
+    }
+  }
+
+  if (espNowReceived)
+  {
+    uint8_t tempBuffer[MAX_PACKET_SIZE];
+    int length;
+
+    noInterrupts();
+
+    length = espNowLength;
+
+    memcpy(
+      tempBuffer,
+      espNowBuffer,
+      length
+    );
+
+    espNowReceived = false;
+
+    interrupts();
+
+    printHex(
+      "ESP-NOW RX: ",
+      tempBuffer,
+      length
+    );
+
+    printHex(
+      "ESP-NOW -> FPGA1 UART TX: ",
+      tempBuffer,
+      length
+    );
+
+    FPGA_UART.write(
+      tempBuffer,
+      length
+    );
+
+    FPGA_UART.flush();
+  }
+}
