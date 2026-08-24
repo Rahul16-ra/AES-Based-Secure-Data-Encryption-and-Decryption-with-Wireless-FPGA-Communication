@@ -1,0 +1,119 @@
+ module aes_top (
+
+    input clk,
+    input rst,
+    input start,
+
+    input  [127:0] plaintext,
+    input  [127:0] key,
+
+    output reg [127:0] ciphertext,
+    output reg done
+    //output [3:0] round_debug
+);
+
+reg [127:0] state;
+reg [3:0] round;
+
+
+
+wire [127:0] sub_out;
+wire [127:0] shift_out;
+wire [127:0] mix_out;
+wire [127:0] round_out;
+wire [127:0] final_round_out;
+
+
+
+subbytes_comb sb (
+    .state_in(state),
+    .state_out(sub_out)
+);
+
+shiftrows sr (
+    .state_in(sub_out),
+    .state_out(shift_out)
+);
+
+mix_columns_comb mc (
+    .state_in(shift_out),
+    .state_out(mix_out)
+);
+
+addroundkey ark1 (
+    .state_in(mix_out),
+    .key(key),
+    .state_out(round_out)
+);
+
+// Final round
+addroundkey ark2 (
+    .state_in(shift_out),
+    .key(key),
+    .state_out(final_round_out)
+);
+
+
+always @(posedge clk or posedge rst)
+begin
+
+    if(rst)
+    begin
+
+        state <= 128'd0;
+        ciphertext <= 128'd0;
+
+        round <= 4'd0;
+
+        done <= 1'b0;
+
+    end
+
+    else
+    begin
+
+        done <= 1'b0;
+
+       
+
+        if(start && round == 0)
+        begin
+
+            state <= plaintext ^ key;
+
+            round <= 4'd1;
+
+        end
+
+        
+
+        else if(round >= 1 && round <= 9)
+        begin
+
+            state <= round_out;
+
+            round <= round + 1'b1;
+
+        end
+
+      
+        else if(round == 10)
+        begin
+
+            state <= final_round_out;
+
+            ciphertext <= final_round_out;
+
+            done <= 1'b1;
+
+            round <= 4'd0;
+
+        end
+
+    end
+
+end
+//assign round_debug = round;
+
+
+endmodule
