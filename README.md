@@ -6,62 +6,6 @@ This project implements a secure wireless communication system between two FPGAs
 
 The system allows data entered on **PC1** to be encrypted by FPGA1, transmitted wirelessly through two ESP32 devices, decrypted by FPGA2, and displayed on **PC2**.
 
----
-
-## System Architecture
-
-
-                         AUTHENTICATION PHASE
-
- PC1
-  |
-  | 8-byte Password
-  v
-+-------+       ESP-NOW        +-------+
-| FPGA1 | <------------------> | FPGA2 |
-+-------+                      +-------+
-    |                              |
-    | Hash / Authentication         | Compare Hash
-    +------------------------------+
-                   |
-                ACK (0xAA)
-
-
-                         DATA TRANSFER PHASE
-
- PC1
-  |
-  | Plaintext
-  | UART
-  v
-+--------+
-| FPGA1  |
-|        |
-| AES-128|
-| Encrypt|
-+--------+
-     |
-     | Ciphertext
-     | UART
-     v
-+--------+       ESP-NOW       +--------+
-| ESP32-1| ~~~~~~~~~~~~~~~~~>  | ESP32-2|
-+--------+                     +--------+
-                                      |
-                                      | UART
-                                      v
-                                 +--------+
-                                 | FPGA2  |
-                                 |        |
-                                 | AES-128|
-                                 | Decrypt|
-                                 +--------+
-                                      |
-                                      | Plaintext
-                                      | UART
-                                      v
-                                     PC2
-
 
 
 Features
