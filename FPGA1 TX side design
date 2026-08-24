@@ -1,0 +1,295 @@
+
+
+module fpga1_aes_enc_top_pipelined_auth #(
+    parameter CLK_FREQ  = 100_000_000,
+    parameter BAUD_RATE = 115200
+)(
+    input        clk,
+    input        rst,
+
+    input        UART_rxd,
+    output       UART_txd,
+
+    output       pmod_txd,
+    input        pmod_rxd,
+
+    output [3:0] led
+);
+
+    localparam [23:0] SYNC_SEQ = 24'hABCDEF;
+
+  
+    wire [7:0] usb_rx_data; wire usb_rx_valid;
+    uart_rx #(.CLK_FREQ(CLK_FREQ),.BAUD_RATE(BAUD_RATE)) U_USB_RX (
+        .clk(clk),.rst(rst),.rx(UART_rxd),
+        .data(usb_rx_data),.valid(usb_rx_valid));
+
+    reg [7:0] usb_tx_data=0; reg usb_tx_start=0; wire usb_tx_busy;
+    uart_tx #(.CLK_FREQ(CLK_FREQ),.BAUD_RATE(BAUD_RATE)) U_USB_TX (
+        .clk(clk),.rst(rst),.data(usb_tx_data),.start(usb_tx_start),
+        .tx(UART_txd),.busy(usb_tx_busy));
+
+    reg [7:0] pmod_tx_data=0; reg pmod_tx_start=0; wire pmod_tx_busy;
+    uart_tx #(.CLK_FREQ(CLK_FREQ),.BAUD_RATE(BAUD_RATE)) U_PMOD_TX (
+        .clk(clk),.rst(rst),.data(pmod_tx_data),.start(pmod_tx_start),
+        .tx(pmod_txd),.busy(pmod_tx_busy));
+
+    wire [7:0] pmod_rx_data; wire pmod_rx_valid;
+    uart_rx #(.CLK_FREQ(CLK_FREQ),.BAUD_RATE(BAUD_RATE)) U_PMOD_RX (
+        .clk(clk),.rst(rst),.rx(pmod_rxd),
+        .data(pmod_rx_data),.valid(pmod_rx_valid));
+
+    reg  [63:0]  password_reg = 64'd0;
+    wire         password_valid;
+    wire [127:0] aes_key, hash_key;
+
+    password_key_derivation U_KDF (
+        .password(password_reg),.password_valid(password_valid),
+        .aes_key(aes_key),.hash_key(hash_key));
+
+    reg  [127:0] aes_plaintext = 0;
+    wire [127:0] ciphertext;
+    reg          aes_start = 0;
+    wire         aes_done;
+
+    aes_top AES_CORE (
+        .clk(clk),.rst(rst),.start(aes_start),
+        .plaintext(aes_plaintext),.key(aes_key),
+        .ciphertext(ciphertext),.done(aes_done));
+
+   
+    reg [127:0] ping = 0, pong = 0;
+    reg         buf_full_0 = 0, buf_full_1 = 0;
+    reg         rx_buf_sel = 0;
+
+   
+    localparam S_WAIT_PW  = 3'd0;
+    localparam S_CHECK_PW = 3'd1;
+    localparam S_SYNC     = 3'd2;
+    localparam S_SEND_VK  = 3'd3;
+    localparam S_WAIT_ACK = 3'd4;
+    localparam S_STREAM   = 3'd5;
+
+    // Pipeline sub-states (used only inside S_STREAM)
+    localparam P_IDLE = 2'd0;
+    localparam P_AES  = 2'd1;
+    localparam P_TX   = 2'd2;
+
+    reg [2:0]  state         = S_WAIT_PW;
+    reg [1:0]  pipe_state    = P_IDLE;
+    reg [4:0]  auth_cnt      = 5'd0;
+    reg [3:0]  rx_byte_cnt   = 4'd0;
+    reg        reject_pulse  = 1'b0;
+
+    // Pipeline TX state
+    reg [127:0] pmod_shift    = 0, echo_shift = 0;
+    reg [3:0]   pmod_cnt      = 0, echo_cnt   = 0;
+    reg         pmod_done_flag= 0, echo_done_flag = 0;
+
+   
+    reg [7:0] auth_byte;
+    integer k;
+    always @(*) begin
+        auth_byte = 8'h00;
+        if      (auth_cnt == 5'd0) auth_byte = SYNC_SEQ[23:16];
+        else if (auth_cnt == 5'd1) auth_byte = SYNC_SEQ[15:8];
+        else if (auth_cnt == 5'd2) auth_byte = SYNC_SEQ[7:0];
+        else
+            for (k = 0; k < 16; k = k+1)
+                if (auth_cnt == k + 3)
+                    auth_byte = hash_key[127 - 8*k -: 8];
+    end
+
+    
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state          <= S_WAIT_PW;
+            pipe_state     <= P_IDLE;
+            auth_cnt       <= 0;
+            rx_byte_cnt    <= 0;
+            password_reg   <= 0;
+            reject_pulse   <= 0;
+            ping           <= 0;  pong       <= 0;
+            buf_full_0     <= 0;  buf_full_1 <= 0;
+            rx_buf_sel     <= 0;
+            aes_start      <= 0;  aes_plaintext <= 0;
+            pmod_shift     <= 0;  echo_shift    <= 0;
+            pmod_cnt       <= 0;  echo_cnt      <= 0;
+            pmod_done_flag <= 0;  echo_done_flag<= 0;
+            pmod_tx_data   <= 0;  pmod_tx_start <= 0;
+            usb_tx_data    <= 0;  usb_tx_start  <= 0;
+        end else begin
+            // Default one-cycle strobes
+            pmod_tx_start  <= 0;
+            usb_tx_start   <= 0;
+            reject_pulse   <= 0;
+            aes_start      <= 0;
+
+            case (state)
+
+            //------------------------------------------------------------------
+            S_WAIT_PW: begin
+                if (usb_rx_valid) begin
+                    password_reg <= {password_reg[55:0], usb_rx_data};
+                    if (auth_cnt == 5'd7) begin
+                        auth_cnt <= 0; state <= S_CHECK_PW;
+                    end else auth_cnt <= auth_cnt + 1;
+                end
+            end
+
+            
+            S_CHECK_PW: begin
+                if (password_valid) begin
+                    auth_cnt <= 0; state <= S_SYNC;
+                end else begin
+                    auth_cnt <= 0; reject_pulse <= 1; state <= S_WAIT_PW;
+                end
+            end
+
+           
+            S_SYNC: begin
+                if (!pmod_tx_busy && !pmod_tx_start) begin
+                    pmod_tx_data  <= auth_byte;
+                    pmod_tx_start <= 1;
+                    if (auth_cnt == 5'd2) begin
+                        auth_cnt <= 3; state <= S_SEND_VK;
+                    end else auth_cnt <= auth_cnt + 1;
+                end
+            end
+
+            
+            S_SEND_VK: begin
+                if (!pmod_tx_busy && !pmod_tx_start) begin
+                    pmod_tx_data  <= auth_byte;
+                    pmod_tx_start <= 1;
+                    if (auth_cnt == 5'd18) begin
+                        auth_cnt <= 0; state <= S_WAIT_ACK;
+                    end else auth_cnt <= auth_cnt + 1;
+                end
+            end
+
+         
+            S_WAIT_ACK: begin
+                if (pmod_rx_valid) begin
+                    if (pmod_rx_data == 8'hAA) begin
+                        // Clear ping-pong before entering stream
+                        rx_buf_sel     <= 0;  rx_byte_cnt    <= 0;
+                        buf_full_0     <= 0;  buf_full_1     <= 0;
+                        pipe_state     <= P_IDLE;
+                        pmod_done_flag <= 0;  echo_done_flag <= 0;
+                        state          <= S_STREAM;
+                    end else begin
+                        reject_pulse <= 1; auth_cnt <= 0; state <= S_WAIT_PW;
+                    end
+                end
+            end
+
+            
+           -
+            S_STREAM: begin
+
+                if (usb_rx_valid) begin
+                    // Shift new byte into the active buffer (MSB first)
+                    if (rx_buf_sel == 0)
+                        ping <= {ping[119:0], usb_rx_data};
+                    else
+                        pong <= {pong[119:0], usb_rx_data};
+
+                    if (rx_byte_cnt == 4'd15) begin
+                        rx_byte_cnt <= 0;
+                       
+                        if (rx_buf_sel == 0) buf_full_0 <= 1;
+                        else                 buf_full_1 <= 1;
+
+                        // Flip to the other buffer if it is empty
+                        if (rx_buf_sel == 0 && !buf_full_1)      rx_buf_sel <= 1;
+                        else if (rx_buf_sel == 1 && !buf_full_0) rx_buf_sel <= 0;
+                        // else: both full (overflow - physically impossible at ≤720 blk/s)
+                    end else begin
+                        rx_byte_cnt <= rx_byte_cnt + 1;
+                    end
+                end
+
+              
+                case (pipe_state)
+
+                P_IDLE: begin
+                    pmod_done_flag <= 0;
+                    echo_done_flag <= 0;
+                    if (buf_full_0) begin
+                        aes_plaintext <= ping;
+                        aes_start     <= 1;
+                        buf_full_0    <= 0;   // claim ping - single driver here
+                        pipe_state    <= P_AES;
+                    end else if (buf_full_1) begin
+                        aes_plaintext <= pong;
+                        aes_start     <= 1;
+                        buf_full_1    <= 0;   // claim pong - single driver here
+                        pipe_state    <= P_AES;
+                    end
+                end
+
+                P_AES: begin
+                    if (aes_done) begin
+                        pmod_shift <= ciphertext;
+                        echo_shift <= ciphertext;
+                        pmod_cnt   <= 0;  echo_cnt   <= 0;
+                        pipe_state <= P_TX;
+                    end
+                end
+
+                P_TX: begin
+                    if (!pmod_done_flag) begin
+                        if (!pmod_tx_busy && !pmod_tx_start) begin
+                            pmod_tx_data  <= pmod_shift[127:120];
+                            pmod_shift    <= {pmod_shift[119:0], 8'h00};
+                            pmod_tx_start <= 1;
+                            if (pmod_cnt == 4'd15) pmod_done_flag <= 1;
+                            else                   pmod_cnt <= pmod_cnt + 1;
+                        end
+                    end
+                    if (!echo_done_flag) begin
+                        if (!usb_tx_busy && !usb_tx_start) begin
+                            usb_tx_data  <= echo_shift[127:120];
+                            echo_shift   <= {echo_shift[119:0], 8'h00};
+                            usb_tx_start <= 1;
+                            if (echo_cnt == 4'd15) echo_done_flag <= 1;
+                            else                   echo_cnt <= echo_cnt + 1;
+                        end
+                    end
+                    if (pmod_done_flag && echo_done_flag)
+                        pipe_state <= P_IDLE;
+                end
+
+                default: pipe_state <= P_IDLE;
+                endcase
+            end // S_STREAM
+
+            default: state <= S_WAIT_PW;
+            endcase
+        end
+    end
+
+    //=========================================================================
+    // LED indicators
+    //=========================================================================
+    reg [21:0] rx_stretch = 0, reject_stretch = 0;
+
+    always @(posedge clk) begin
+        if (rst)               rx_stretch <= 0;
+        else if (usb_rx_valid) rx_stretch <= 22'h3FFFFF;
+        else if (|rx_stretch)  rx_stretch <= rx_stretch - 1;
+    end
+
+    always @(posedge clk) begin
+        if (rst)               reject_stretch <= 0;
+        else if (reject_pulse) reject_stretch <= 22'h3FFFFF;
+        else if (|reject_stretch) reject_stretch <= reject_stretch - 1;
+    end
+
+    assign led[0] = |rx_stretch;
+    assign led[1] = (state == S_STREAM) ? (pipe_state == P_AES) : |reject_stretch;
+    assign led[2] = pmod_tx_busy;
+    assign led[3] = usb_tx_busy;
+
+endmodule
