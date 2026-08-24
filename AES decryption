@@ -1,0 +1,108 @@
+ `timescale 1ns / 1ps
+// AES-128 Decryption Core
+// Replaces: aes.v
+//
+// Decryption reverses the encryption round structure:
+//   Encryption: ARK -> [SubBytes -> ShiftRows -> MixColumns -> ARK] x9 -> SubBytes -> ShiftRows -> ARK
+//   Decryption: ARK -> [InvShiftRows -> InvSubBytes -> ARK -> InvMixColumns] x9 -> InvShiftRows -> InvSubBytes -> ARK
+//
+// NOTE: This design uses the same single key for every round (no key schedule).
+// This matches the original encryption design so ciphertext encrypted with aes.v
+// can be decrypted correctly with this module using the same key.
+
+module aes_dec_top (
+
+    input            clk,
+    input            rst,
+    input            start,
+
+    input  [127:0]   ciphertext,   // input: encrypted data
+    input  [127:0]   key,          // same key as used in encryption
+
+    output reg [127:0] plaintext,  // output: recovered original data
+    output reg         done
+);
+
+reg [127:0] state;
+reg [3:0]   round;
+
+
+
+// Initial round path: InvShiftRows -> InvSubBytes -> ARK (no InvMixCols in final dec round)
+wire [127:0] isr_out;         // after InvShiftRows
+wire [127:0] isb_out;         // after InvSubBytes
+wire [127:0] ark_final_out;   // ARK on the initial/final path (round 10 in decryption)
+
+// Middle rounds path: InvShiftRows -> InvSubBytes -> ARK -> InvMixColumns
+wire [127:0] ark_mid_out;     // ARK after InvSubBytes (middle rounds)
+wire [127:0] imc_out;         // after InvMixColumns (middle rounds)
+
+// Step 1: InvShiftRows - applied to state every round
+inv_shiftrows isr (
+    .state_in  (state),
+    .state_out (isr_out)
+);
+
+// Step 2: InvSubBytes - applied after InvShiftRows every round
+inv_subbytes_comb isb (
+    .state_in  (isr_out),
+    .state_out (isb_out)
+);
+
+// Step 3a: AddRoundKey for the FINAL decryption round (round==10, no InvMixCols after)
+addroundkey ark_final (
+    .state_in  (isb_out),
+    .key       (key),
+    .state_out (ark_final_out)
+);
+
+// Step 3b: AddRoundKey for middle rounds (rounds 1-9, feeds into InvMixCols)
+addroundkey ark_mid (
+    .state_in  (isb_out),
+    .key       (key),
+    .state_out (ark_mid_out)
+);
+
+// Step 4: InvMixColumns - only for middle rounds 1-9
+inv_mix_columns_comb imc (
+    .state_in  (ark_mid_out),
+    .state_out (imc_out)
+);
+
+
+always @(posedge clk or posedge rst) begin
+
+    if (rst) begin
+        state     <= 128'd0;
+        plaintext <= 128'd0;
+        round     <= 4'd0;
+        done      <= 1'b0;
+    end
+
+    else begin
+
+        done <= 1'b0;
+
+        if (start && round == 0) begin
+            state <= ciphertext ^ key;
+            round <= 4'd1;
+        end
+
+      
+        else if (round >= 1 && round <= 9) begin
+            state <= imc_out;
+            round <= round + 1'b1;
+        end
+
+        else if (round == 10) begin
+            state     <= ark_final_out;
+            plaintext <= ark_final_out;
+            done      <= 1'b1;
+            round     <= 4'd0;
+        end
+
+    end
+
+end
+
+endmodule
