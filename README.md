@@ -8,7 +8,7 @@ The system allows data entered on **PC1** to be encrypted by FPGA1, transmitted 
 
 
 
-Features
+FEATURES
 AES-128 encryption and decryption
 Password-based authentication
 Wireless FPGA-to-FPGA communication
